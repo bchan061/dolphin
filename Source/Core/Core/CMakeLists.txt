@@ -624,6 +624,7 @@ PUBLIC
   enet::enet
   expr
   inputcommon
+  gymserver
   MbedTLS::mbedtls
   pugixml
   RangeSet::RangeSet

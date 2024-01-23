@@ -6,6 +6,7 @@ add_subdirectory(InputCommon)
 add_subdirectory(UICommon)
 add_subdirectory(VideoCommon)
 add_subdirectory(VideoBackends)
+add_subdirectory(GymServer)
 
 if(ENABLE_NOGUI)
   add_subdirectory(DolphinNoGUI)

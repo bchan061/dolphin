@@ -128,6 +128,8 @@
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/GCAdapter.h"
 
+#include "GymServer/GymServer.h"
+
 #include "UICommon/DiscordPresence.h"
 #include "UICommon/GameFile.h"
 #include "UICommon/ResourcePack/Manager.h"
@@ -1136,6 +1138,11 @@ void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
   if (!NetPlay::IsNetPlayRunning())
     Discord::UpdateDiscordPresence();
 #endif
+
+  // Start GymServer if not already running
+  if (!GymServer::GymServer::Instance().IsRunning()) {
+    GymServer::GymServer::Instance().Start(GymServer::DEFAULT_PORT);
+  }
 
   if (Config::Get(Config::MAIN_FULLSCREEN))
     m_fullscreen_requested = true;
