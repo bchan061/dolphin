@@ -163,7 +163,7 @@ target_link_libraries(common
 PUBLIC
   ${CMAKE_THREAD_LIBS_INIT}
   enet::enet
-  fmt::fmt
+  fmt::fmt-header-only
   MbedTLS::mbedtls
   minizip::minizip
   sfml-network
@@ -171,6 +171,7 @@ PUBLIC
 PRIVATE
   CURL::libcurl
   FatFs
+  fmt::fmt
   Iconv::Iconv
   spng::spng
   ${VTUNE_LIBRARIES}

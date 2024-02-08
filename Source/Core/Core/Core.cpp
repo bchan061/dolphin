@@ -81,6 +81,8 @@
 
 #include "DiscIO/RiivolutionPatcher.h"
 
+#include "GymServer/GymServer.h"
+
 #include "InputCommon/ControlReference/ControlReference.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/GCAdapter.h"
@@ -179,6 +181,7 @@ void OnFrameEnd()
     s_memory_watcher->Step(guard);
   }
 #endif
+  GymServer::GymServer::Instance().Step();
 }
 
 // Display messages and return values

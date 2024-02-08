@@ -1141,7 +1141,7 @@ void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
 
   // Start GymServer if not already running
   if (!GymServer::GymServer::Instance().IsRunning()) {
-    GymServer::GymServer::Instance().Start(GymServer::DEFAULT_PORT);
+    GymServer::GymServer::Instance().Start(GymServer::DEFAULT_SERVER_PORT);
   }
 
   if (Config::Get(Config::MAIN_FULLSCREEN))

@@ -623,6 +623,7 @@ PUBLIC
   discio
   enet::enet
   expr
+  fmt::fmt
   inputcommon
   gymserver
   MbedTLS::mbedtls
