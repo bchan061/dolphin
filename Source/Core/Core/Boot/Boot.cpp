@@ -315,11 +315,12 @@ BootParameters::IPL::IPL(DiscIO::Region region_, Disc&& disc_) : IPL(region_)
 // Inserts a disc into the emulated disc drive and returns a pointer to it.
 // The returned pointer must only be used while we are still booting,
 // because DVDThread can do whatever it wants to the disc after that.
-static const DiscIO::VolumeDisc* SetDisc(std::unique_ptr<DiscIO::VolumeDisc> disc,
+static const DiscIO::VolumeDisc* SetDisc(DVD::DVDInterface& dvd_interface,
+                                         std::unique_ptr<DiscIO::VolumeDisc> disc,
                                          std::vector<std::string> auto_disc_change_paths = {})
 {
   const DiscIO::VolumeDisc* pointer = disc.get();
-  Core::System::GetInstance().GetDVDInterface().SetDisc(std::move(disc), auto_disc_change_paths);
+  dvd_interface.SetDisc(std::move(disc), auto_disc_change_paths);
   return pointer;
 }
 
@@ -487,11 +488,11 @@ bool CBoot::Load_BS2(Core::System& system, const std::string& boot_rom_filename)
   return true;
 }
 
-static void SetDefaultDisc()
+static void SetDefaultDisc(DVD::DVDInterface& dvd_interface)
 {
   const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
   if (!default_iso.empty())
-    SetDisc(DiscIO::CreateDisc(default_iso));
+    SetDisc(dvd_interface, DiscIO::CreateDisc(default_iso));
 }
 
 static void CopyDefaultExceptionHandlers(Core::System& system)
@@ -521,7 +522,7 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
 
   // PAL Wii uses NTSC framerate and linecount in 60Hz modes
   system.GetVideoInterface().Preset(DiscIO::IsNTSC(config.m_region) ||
-                                    (config.bWii && Config::Get(Config::SYSCONF_PAL60)));
+                                    (system.IsWii() && Config::Get(Config::SYSCONF_PAL60)));
 
   struct BootTitle
   {
@@ -535,12 +536,12 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
     {
       NOTICE_LOG_FMT(BOOT, "Booting from disc: {}", disc.path);
       const DiscIO::VolumeDisc* volume =
-          SetDisc(std::move(disc.volume), disc.auto_disc_change_paths);
+          SetDisc(system.GetDVDInterface(), std::move(disc.volume), disc.auto_disc_change_paths);
 
       if (!volume)
         return false;
 
-      if (!EmulatedBS2(system, guard, config.bWii, *volume, riivolution_patches))
+      if (!EmulatedBS2(system, guard, system.IsWii(), *volume, riivolution_patches))
         return false;
 
       SConfig::OnNewTitleLoad(guard);
@@ -554,16 +555,16 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       if (!executable.reader->IsValid())
         return false;
 
-      SetDefaultDisc();
+      SetDefaultDisc(system.GetDVDInterface());
 
       auto& ppc_state = system.GetPPCState();
 
       SetupMSR(ppc_state);
-      SetupHID(ppc_state, config.bWii);
-      SetupBAT(system, config.bWii);
+      SetupHID(ppc_state, system.IsWii());
+      SetupBAT(system, system.IsWii());
       CopyDefaultExceptionHandlers(system);
 
-      if (config.bWii)
+      if (system.IsWii())
       {
         // Set a value for the SP. It doesn't matter where this points to,
         // as long as it is a valid location. This value is taken from a homebrew binary.
@@ -572,7 +573,7 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
         // Because there is no TMD to get the requested system (IOS) version from,
         // we default to IOS58, which is the version used by the Homebrew Channel.
         SetupWiiMemory(system, IOS::HLE::IOSC::ConsoleType::Retail);
-        IOS::HLE::GetIOS()->BootIOS(Titles::IOS(58));
+        system.GetIOS()->BootIOS(Titles::IOS(58));
       }
       else
       {
@@ -604,7 +605,7 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
 
     bool operator()(const DiscIO::VolumeWAD& wad) const
     {
-      SetDefaultDisc();
+      SetDefaultDisc(system.GetDVDInterface());
       if (!Boot_WiiWAD(system, wad))
         return false;
 
@@ -614,7 +615,7 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
 
     bool operator()(const BootParameters::NANDTitle& nand_title) const
     {
-      SetDefaultDisc();
+      SetDefaultDisc(system.GetDVDInterface());
       if (!BootNANDTitle(system, nand_title.id))
         return false;
 
@@ -640,7 +641,8 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       if (ipl.disc)
       {
         NOTICE_LOG_FMT(BOOT, "Inserting disc: {}", ipl.disc->path);
-        SetDisc(DiscIO::CreateDisc(ipl.disc->path), ipl.disc->auto_disc_change_paths);
+        SetDisc(system.GetDVDInterface(), DiscIO::CreateDisc(ipl.disc->path),
+                ipl.disc->auto_disc_change_paths);
       }
 
       SConfig::OnNewTitleLoad(guard);
@@ -650,7 +652,7 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
     bool operator()(const BootParameters::DFF& dff) const
     {
       NOTICE_LOG_FMT(BOOT, "Booting DFF: {}", dff.dff_path);
-      return FifoPlayer::GetInstance().Open(dff.dff_path);
+      return system.GetFifoPlayer().Open(dff.dff_path);
     }
 
   private:
@@ -699,7 +701,7 @@ void UpdateStateFlags(std::function<void(StateFlags*)> update_function)
 {
   CreateSystemMenuTitleDirs();
   const std::string file_path = Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_STATE;
-  const auto fs = IOS::HLE::GetIOS()->GetFS();
+  const auto fs = Core::System::GetInstance().GetIOS()->GetFS();
   constexpr IOS::HLE::FS::Mode rw_mode = IOS::HLE::FS::Mode::ReadWrite;
   const auto file = fs->CreateAndOpenFile(IOS::SYSMENU_UID, IOS::SYSMENU_GID, file_path,
                                           {rw_mode, rw_mode, rw_mode});
@@ -719,7 +721,7 @@ void UpdateStateFlags(std::function<void(StateFlags*)> update_function)
 
 void CreateSystemMenuTitleDirs()
 {
-  const auto& es = IOS::HLE::GetIOS()->GetESCore();
+  const auto& es = Core::System::GetInstance().GetIOS()->GetESCore();
   es.CreateTitleDirectories(Titles::SYSTEM_MENU, IOS::SYSMENU_GID);
 }
 

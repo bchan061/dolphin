@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <utility>
@@ -97,10 +98,6 @@
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoEvents.h"
 
-#ifdef ANDROID
-#include "jni/AndroidCommon/IDCache.h"
-#endif
-
 namespace Core
 {
 static bool s_wants_determinism;
@@ -136,7 +133,8 @@ static thread_local bool tls_is_cpu_thread = false;
 static thread_local bool tls_is_gpu_thread = false;
 static thread_local bool tls_is_host_thread = false;
 
-static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi);
+static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,
+                      WindowSystemInfo wsi);
 
 static Common::EventHook s_frame_presented = AfterPresentEvent::Register(
     [](auto& present_info) {
@@ -242,7 +240,7 @@ bool WantsDeterminism()
 
 // This is called from the GUI thread. See the booting call schedule in
 // BootManager.cpp
-bool Init(std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)
+bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)
 {
   if (s_emu_thread.joinable())
   {
@@ -259,9 +257,8 @@ bool Init(std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)
   // Drain any left over jobs
   HostDispatchJobs();
 
-  INFO_LOG_FMT(BOOT, "Starting core = {} mode", SConfig::GetInstance().bWii ? "Wii" : "GameCube");
-  INFO_LOG_FMT(BOOT, "CPU Thread separate = {}",
-               Core::System::GetInstance().IsDualCoreMode() ? "Yes" : "No");
+  INFO_LOG_FMT(BOOT, "Starting core = {} mode", system.IsWii() ? "Wii" : "GameCube");
+  INFO_LOG_FMT(BOOT, "CPU Thread separate = {}", system.IsDualCoreMode() ? "Yes" : "No");
 
   Host_UpdateMainFrame();  // Disable any menus or buttons at boot
 
@@ -274,7 +271,7 @@ bool Init(std::unique_ptr<BootParameters> boot, const WindowSystemInfo& wsi)
 
   // Start the emu thread
   s_is_booting.Set();
-  s_emu_thread = std::thread(EmuThread, std::move(boot), prepared_wsi);
+  s_emu_thread = std::thread(EmuThread, std::ref(system), std::move(boot), prepared_wsi);
   return true;
 }
 
@@ -374,11 +371,12 @@ static void CPUSetInitialExecutionState(bool force_paused = false)
 }
 
 // Create the CPU thread, which is a CPU + Video thread in Single Core mode.
-static void CpuThread(const std::optional<std::string>& savestate_path, bool delete_savestate)
+static void CpuThread(Core::System& system, const std::optional<std::string>& savestate_path,
+                      bool delete_savestate)
 {
   DeclareAsCPUThread();
 
-  if (Core::System::GetInstance().IsDualCoreMode())
+  if (system.IsDualCoreMode())
     Common::SetCurrentThreadName("CPU thread");
   else
     Common::SetCurrentThreadName("CPU-GPU thread");
@@ -388,12 +386,6 @@ static void CpuThread(const std::optional<std::string>& savestate_path, bool del
 
   // Clear performance data collected from previous threads.
   g_perf_metrics.Reset();
-
-#ifdef ANDROID
-  // For some reason, calling the JNI function AttachCurrentThread from the CPU thread after a
-  // certain point causes a crash if fastmem is enabled. Let's call it early to avoid that problem.
-  static_cast<void>(IDCache::GetEnvForThread());
-#endif
 
   // The JIT need to be able to intercept faults, both for fastmem and for the BLR optimization.
   const bool exception_handler = EMM::IsExceptionHandlerSupported();
@@ -437,7 +429,6 @@ static void CpuThread(const std::optional<std::string>& savestate_path, bool del
   }
 
   // Enter CPU run loop. When we leave it - we are done.
-  auto& system = Core::System::GetInstance();
   system.GetCPU().Run();
 
 #ifdef USE_MEMORYWATCHER
@@ -457,19 +448,18 @@ static void CpuThread(const std::optional<std::string>& savestate_path, bool del
   }
 }
 
-static void FifoPlayerThread(const std::optional<std::string>& savestate_path,
+static void FifoPlayerThread(Core::System& system, const std::optional<std::string>& savestate_path,
                              bool delete_savestate)
 {
   DeclareAsCPUThread();
 
-  auto& system = Core::System::GetInstance();
   if (system.IsDualCoreMode())
     Common::SetCurrentThreadName("FIFO player thread");
   else
     Common::SetCurrentThreadName("FIFO-GPU thread");
 
   // Enter CPU run loop. When we leave it - we are done.
-  if (auto cpu_core = FifoPlayer::GetInstance().GetCPUCore())
+  if (auto cpu_core = system.GetFifoPlayer().GetCPUCore())
   {
     system.GetPowerPC().InjectExternalCPUCore(cpu_core.get());
     s_is_started = true;
@@ -479,13 +469,13 @@ static void FifoPlayerThread(const std::optional<std::string>& savestate_path,
 
     s_is_started = false;
     system.GetPowerPC().InjectExternalCPUCore(nullptr);
-    FifoPlayer::GetInstance().Close();
+    system.GetFifoPlayer().Close();
   }
   else
   {
     // FIFO log does not contain any frames, cannot continue.
     PanicAlertFmt("FIFO file is invalid, cannot playback.");
-    FifoPlayer::GetInstance().Close();
+    system.GetFifoPlayer().Close();
     return;
   }
 }
@@ -493,10 +483,9 @@ static void FifoPlayerThread(const std::optional<std::string>& savestate_path,
 // Initialize and create emulation thread
 // Call browser: Init():s_emu_thread().
 // See the BootManager.cpp file description for a complete call schedule.
-static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi)
+static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,
+                      WindowSystemInfo wsi)
 {
-  Core::System& system = Core::System::GetInstance();
-  const SConfig& core_parameter = SConfig::GetInstance();
   CallOnStateChangedCallbacks(State::Starting);
   Common::ScopeGuard flag_guard{[] {
     s_is_booting.Clear();
@@ -534,7 +523,7 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
   const bool delete_savestate =
       boot_session_data.GetDeleteSavestate() == DeleteSavestateAfterBoot::Yes;
 
-  bool sync_sd_folder = core_parameter.bWii && Config::Get(Config::MAIN_WII_SD_CARD) &&
+  bool sync_sd_folder = system.IsWii() && Config::Get(Config::MAIN_WII_SD_CARD) &&
                         Config::Get(Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC);
   if (sync_sd_folder)
   {
@@ -557,7 +546,7 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
   }};
 
   // Load Wiimotes - only if we are booting in Wii mode
-  if (core_parameter.bWii && !Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
+  if (system.IsWii() && !Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
   {
     Wiimote::LoadConfig();
   }
@@ -567,8 +556,8 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
   system.GetCustomAssetLoader().Init();
   Common::ScopeGuard asset_loader_guard([&system] { system.GetCustomAssetLoader().Shutdown(); });
 
-  Movie::Init(*boot);
-  Common::ScopeGuard movie_guard{&Movie::Shutdown};
+  system.GetMovie().Init(*boot);
+  Common::ScopeGuard movie_guard([&system] { system.GetMovie().Shutdown(); });
 
   AudioCommon::InitSoundStream(system);
   Common::ScopeGuard audio_guard([&system] { AudioCommon::ShutdownSoundStream(system); });
@@ -613,7 +602,7 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
   else
     Config::SetBaseOrCurrent(Config::MAIN_DSP_THREAD, cpu_info.num_cores > 2);
 
-  if (!system.GetDSP().GetDSPEmulator()->Initialize(core_parameter.bWii,
+  if (!system.GetDSP().GetDSPEmulator()->Initialize(system.IsWii(),
                                                     Config::Get(Config::MAIN_DSP_THREAD)))
   {
     PanicAlertFmt("Failed to initialize DSP emulation!");
@@ -633,14 +622,15 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
   system.GetPowerPC().SetMode(PowerPC::CoreMode::Interpreter);
 
   // Determine the CPU thread function
-  void (*cpuThreadFunc)(const std::optional<std::string>& savestate_path, bool delete_savestate);
+  void (*cpuThreadFunc)(Core::System & system, const std::optional<std::string>& savestate_path,
+                        bool delete_savestate);
   if (std::holds_alternative<BootParameters::DFF>(boot->parameters))
     cpuThreadFunc = FifoPlayerThread;
   else
     cpuThreadFunc = CpuThread;
 
   std::optional<DiscIO::Riivolution::SavegameRedirect> savegame_redirect = std::nullopt;
-  if (SConfig::GetInstance().bWii)
+  if (system.IsWii())
     savegame_redirect = DiscIO::Riivolution::ExtractSavegameRedirect(boot->riivolution_patches);
 
   {
@@ -657,7 +647,7 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
     Core::CleanUpWiiFileSystemContents(boot_session_data);
     boot_session_data.InvokeWiiSyncCleanup();
   }};
-  if (SConfig::GetInstance().bWii)
+  if (system.IsWii())
     Core::InitializeWiiFileSystemContents(savegame_redirect, boot_session_data);
   else
     wiifs_guard.Dismiss();
@@ -687,7 +677,8 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
     Common::FPU::LoadDefaultSIMDState();
 
     // Spawn the CPU thread. The CPU thread will signal the event that boot is complete.
-    s_cpu_thread = std::thread(cpuThreadFunc, savestate_path, delete_savestate);
+    s_cpu_thread =
+        std::thread(cpuThreadFunc, std::ref(system), std::ref(savestate_path), delete_savestate);
 
     // become the GPU thread
     system.GetFifo().RunGpuLoop();
@@ -706,7 +697,7 @@ static void EmuThread(std::unique_ptr<BootParameters> boot, WindowSystemInfo wsi
   else  // SingleCore mode
   {
     // Become the CPU thread
-    cpuThreadFunc(savestate_path, delete_savestate);
+    cpuThreadFunc(system, savestate_path, delete_savestate);
   }
 
   INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "Stopping GDB ..."));
@@ -1020,18 +1011,18 @@ void UpdateWantDeterminism(bool initial)
   // For now, this value is not itself configurable.  Instead, individual
   // settings that depend on it, such as GPU determinism mode. should have
   // override options for testing,
-  bool new_want_determinism = Movie::IsMovieActive() || NetPlay::IsNetPlayRunning();
+  auto& system = Core::System::GetInstance();
+  bool new_want_determinism = system.GetMovie().IsMovieActive() || NetPlay::IsNetPlayRunning();
   if (new_want_determinism != s_wants_determinism || initial)
   {
     NOTICE_LOG_FMT(COMMON, "Want determinism <- {}", new_want_determinism ? "true" : "false");
 
     RunAsCPUThread([&] {
       s_wants_determinism = new_want_determinism;
-      const auto ios = IOS::HLE::GetIOS();
+      const auto ios = system.GetIOS();
       if (ios)
         ios->UpdateWantDeterminism(new_want_determinism);
 
-      auto& system = Core::System::GetInstance();
       system.GetFifo().UpdateWantDeterminism(new_want_determinism);
 
       // We need to clear the cache because some parts of the JIT depend on want_determinism,
