@@ -41,8 +41,7 @@ namespace GymServer {
         auto& debug_interface = system.GetPowerPC().GetDebugInterface();
 
         Core::CPUThreadGuard guard(system);
-
-        const uint32_t num_watches = debug_interface.GetWatches().size();
+        const size_t num_watches = debug_interface.GetWatches().size();
         std::vector<Common::Debug::Watch> debug_watches = debug_interface.GetWatches();
         std::vector<MemoryWatch> memory_watches;
         for (size_t i = 0; i < debug_watches.size(); i++) {
@@ -54,12 +53,14 @@ namespace GymServer {
         // packet_size: 4 bytes
         // magic: 4 bytes
         // each watch: 8 bytes
-        const uint32_t packet_size = 4 + 4 + sizeof(MemoryWatch) * num_watches;
-        uint8_t packet_buffer[packet_size];
-        ServerPacket* packet = reinterpret_cast<ServerPacket*>(&packet_buffer);
-        packet->size = packet_size;
+        const size_t packet_size = 4 + 4 + sizeof(MemoryWatch) * num_watches;
+        std::vector<uint8_t> packet_buffer_vector(packet_size);
+        uint8_t* packet_buffer = packet_buffer_vector.data();
+
+        ServerPacket* packet = reinterpret_cast<ServerPacket*>(packet_buffer);
+        packet->size = static_cast<uint32_t>(packet_size);
         strcpy(packet->magic, SERVER_PACKET_MAGIC);
-        memcpy(packet_buffer + 8, memory_watches.data(), 8 * num_watches);
+        memcpy(packet_buffer + 8, memory_watches.data(), sizeof(MemoryWatch) * num_watches);
 
         m_socket.send(packet_buffer, packet_size, DEFAULT_HOST, DEFAULT_CLIENT_PORT);
     }
