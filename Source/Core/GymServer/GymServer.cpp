@@ -1,6 +1,7 @@
 #define _WEBSOCKETPP_NO_EXCEPTIONS_
 
 #include <iostream>
+#include <thread>
 #include <chrono>
 
 #include "GymServer.h"
@@ -28,6 +29,7 @@ namespace GymServer {
             std::cerr << "Unable to bind GymServer UDP socket to " << port << std::endl;
             return;
         }
+        m_socket.setBlocking(false);
 
         m_running = true;
     }
@@ -39,12 +41,36 @@ namespace GymServer {
 
         auto& system = Core::System::GetInstance();
         auto& debug_interface = system.GetPowerPC().GetDebugInterface();
-
         Core::CPUThreadGuard guard(system);
+
+        Listen(guard, debug_interface);
+        SendServerPacket(guard, debug_interface);
+    }
+
+    void GymServer::Listen(Core::CPUThreadGuard& guard, PPCDebugInterface& debug_interface) {
+        size_t packet_size = sizeof(ClientPacket);
+        std::vector<uint8_t> packet(packet_size);
+        uint8_t* packet_buffer = packet.data();
+
+        sf::IpAddress sender;
+        uint16_t port;
+        size_t received;
+        sf::Socket::Status socket_status = m_socket.receive(packet_buffer, packet_size, received, sender, port);
+        if (socket_status == sf::Socket::NotReady || socket_status == sf::Socket::Disconnected) {
+            return;
+        }
+
+        ClientPacket* client_packet = reinterpret_cast<ClientPacket*>(packet_buffer);
+        MemoryPatch memory_patch = client_packet->patch;
+        debug_interface.SetPatch(guard, memory_patch.address, memory_patch.value);
+    }
+
+    void GymServer::SendServerPacket(Core::CPUThreadGuard& guard, PPCDebugInterface& debug_interface) {
         const size_t num_watches = debug_interface.GetWatches().size();
         std::vector<Common::Debug::Watch> debug_watches = debug_interface.GetWatches();
         std::vector<MemoryWatch> memory_watches;
-        for (size_t i = 0; i < debug_watches.size(); i++) {
+        for (size_t i = 0; i < debug_watches.size(); i++)
+        {
             const auto& debug_watch = debug_watches[i];
             const uint32_t watch_value = debug_interface.ReadMemory(guard, debug_watch.address);
             memory_watches.emplace_back(debug_watch.address, watch_value);
@@ -60,7 +86,7 @@ namespace GymServer {
         ServerPacket* packet = reinterpret_cast<ServerPacket*>(packet_buffer);
         packet->size = static_cast<uint32_t>(packet_size);
         strcpy(packet->magic, SERVER_PACKET_MAGIC);
-        memcpy(packet_buffer + 8, memory_watches.data(), sizeof(MemoryWatch) * num_watches);
+        memcpy(&packet->watches, memory_watches.data(), sizeof(MemoryWatch) * num_watches);
 
         m_socket.send(packet_buffer, packet_size, DEFAULT_HOST, DEFAULT_CLIENT_PORT);
     }
